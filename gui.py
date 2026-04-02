@@ -126,9 +126,6 @@ class ToolManagerGUI(QMainWindow):
         self.refresh_btn.clicked.connect(self.update_dependency_status)
         sys_layout.addWidget(self.refresh_btn)
 
-        self.doctor_btn = QPushButton("Doctor")
-        self.doctor_btn.clicked.connect(self.run_doctor)
-        sys_layout.addWidget(self.doctor_btn)
 
         layout.addLayout(sys_layout)
 
