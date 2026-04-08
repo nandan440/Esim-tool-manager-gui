@@ -48,7 +48,7 @@ def normalize_tool_name(tool_name):
     if not tool_name:
         return ""
     return str(tool_name).strip().lower()
-
+        
 
 def get_supported_tools():
     return list(INSTALLERS.keys())
@@ -86,10 +86,6 @@ def uninstall_tool(tool_name, log=print):
 
     if canonical == "python":
         _uninstall_python(log)
-        return
-
-    if canonical == "nghdl":
-        log("NGHDL is bundled with eSim. Uninstall eSim separately if you need to remove it.")
         return
 
     os_type = _platform_name()

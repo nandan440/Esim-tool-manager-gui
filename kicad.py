@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import urllib.error
 import urllib.request
+import time
 from datetime import datetime
 
 import yaml
@@ -28,6 +29,7 @@ KICAD_RELEASES_API = (
 )
 
 
+
 def get_os():
     # Keep OS naming aligned with the rest of the tool manager modules.
     system = platform.system().lower()
@@ -44,24 +46,32 @@ def run(cmd, log=print, cwd=None):
     display_cmd = cmd if isinstance(cmd, str) else " ".join(cmd)
     log(f"> {display_cmd}")
 
-    process = subprocess.Popen(
-        cmd,
-        shell=isinstance(cmd, str),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        cwd=cwd,
-    )
+    try:
+        process = subprocess.Popen(
+            cmd,
+            shell=isinstance(cmd, str),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=cwd,
+        )
 
-    if process.stdout:
         for line in iter(process.stdout.readline, ""):
             if not line:
                 break
             log(line.rstrip())
 
-    process.wait()
-    if process.returncode != 0:
-        raise RuntimeError(f"Command failed: {display_cmd}")
+        process.wait()
+
+        if process.returncode != 0:
+            log(f"[ERROR] Command failed: {display_cmd}")
+            return False
+
+        return True
+
+    except Exception as e:
+        log(f"[ERROR] {e}")
+        return False
 
 
 def load_tools():
@@ -276,12 +286,50 @@ def _find_asset_url(release, patterns):
     return None
 
 
-def _download(url, dest_path, log=print):
+def _download(url, dest_path, log=print, progress_cb=None):
+    """
+    Download file with real progress, speed, ETA.
+    progress_cb(percent, speed_MBps, eta_sec) -> optional for GUI
+    """
+
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     log(f"Downloading: {url}")
+
     req = urllib.request.Request(url, headers={"User-Agent": "tool_manager_gui"})
-    with urllib.request.urlopen(req, timeout=120) as response, open(dest_path, "wb") as handle:
-        shutil.copyfileobj(response, handle)
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            total_size = int(response.getheader("Content-Length", 0))
+            downloaded = 0
+            chunk_size = 1024 * 1024  # 1 MB
+            start_time = time.time()
+
+            with open(dest_path, "wb") as f:
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    elapsed = time.time() - start_time
+                    speed = downloaded / (1024 * 1024) / elapsed if elapsed > 0 else 0
+                    remaining = total_size - downloaded
+                    eta = (remaining / (1024 * 1024) / speed) if speed > 0 else 0
+
+                    percent = (downloaded / total_size * 100) if total_size else 0
+
+                    msg = f"{percent:.1f}% | {speed:.2f} MB/s | ETA: {eta:.1f}s"
+                    log(msg)
+
+                    if progress_cb:
+                        progress_cb(percent, speed, eta)
+
+    except Exception as e:
+        raise RuntimeError(f"Download failed: {e}")
+
+    log("Download complete ✅")
     return dest_path
 
 
@@ -393,60 +441,8 @@ def install_kicad_windows(version, log=print):
     return installed_version, find_kicad_install_path()
 
 
-def install_kicad_macos(version, log=print):
-    if tool_exists("brew") and str(version).lower() == "latest":
-        log("Installing KiCad via Homebrew cask")
-        run(["brew", "install", "--cask", "kicad"], log)
-        return "latest", find_kicad_install_path()
 
-    # For pinned versions on macOS, use the official DMG from the matching GitHub release.
-    releases = _fetch_release_assets(log)
-    release = _select_release_for_version(version, releases)
-    asset = _find_asset_url(release, patterns=["unified", ".dmg"])
-    if asset is None:
-        asset = _find_asset_url(release, patterns=[".dmg"])
-    if asset is None:
-        raise RuntimeError("No suitable KiCad macOS DMG asset found.")
-
-    url, filename = asset
-    dmg_path = os.path.join(TOOLS_DIR, filename)
-    _download(url, dmg_path, log)
-
-    attach_output = subprocess.check_output(
-        ["hdiutil", "attach", dmg_path, "-nobrowse"],
-        text=True,
-    )
-    mount_point = None
-    for line in attach_output.splitlines():
-        if "/Volumes/" in line:
-            mount_point = line.split("\t")[-1].strip() if "\t" in line else line.split()[-1].strip()
-            break
-
-    if not mount_point or not os.path.exists(mount_point):
-        raise RuntimeError("Failed to mount KiCad DMG")
-
-    try:
-        app_path = None
-        for name in os.listdir(mount_point):
-            if name.lower().endswith(".app"):
-                app_path = os.path.join(mount_point, name)
-                break
-        if not app_path:
-            raise RuntimeError("KiCad app bundle not found inside the DMG")
-
-        destination = os.path.join("/Applications", os.path.basename(app_path))
-        if os.path.exists(destination):
-            shutil.rmtree(destination)
-
-        run(["ditto", app_path, destination], log)
-    finally:
-        subprocess.run(["hdiutil", "detach", mount_point, "-quiet"], check=False)
-
-    installed_version = release["tag_name"].lstrip("v") if release else version
-    return installed_version, find_kicad_install_path()
-
-
-def install_kicad(version="latest", log=print):
+def install_kicad(version="latest", log=print, progress_cb=None):
     # The public entrypoint keeps policy decisions here and delegates OS details below.
     config = get_kicad_config()
     os_type = get_os()
@@ -541,26 +537,71 @@ def _uninstall_kicad_windows(log=print):
         raise
 
 
-def _uninstall_kicad_macos(log=print):
-    log("Removing KiCad (macOS)...")
+
+def install_kicad_macos(version, log=print, progress_cb=None):
+    if tool_exists("brew") and str(version).lower() == "latest":
+        log("Installing KiCad via Homebrew cask")
+        run(["brew", "install", "--cask", "kicad"], log)
+        return "latest", find_kicad_install_path()
+
+    releases = _fetch_release_assets(log)
+    release = _select_release_for_version(version, releases)
+
+    asset = _find_asset_url(release, patterns=["unified", ".dmg"])
+    if asset is None:
+        asset = _find_asset_url(release, patterns=[".dmg"])
+
+    if asset is None:
+        raise RuntimeError("No suitable KiCad macOS DMG found.")
+
+    url, filename = asset
+    dmg_path = os.path.join(TOOLS_DIR, filename)
+
+    # 🔥 FIXED DOWNLOAD
+    _download(url, dmg_path, log, progress_cb)
+
+    log("Mounting DMG...")
+
+    attach_output = subprocess.check_output(
+        ["hdiutil", "attach", dmg_path, "-nobrowse"],
+        text=True,
+    )
+
+    mount_point = None
+    for line in attach_output.splitlines():
+        if "/Volumes/" in line:
+            mount_point = line.split("\t")[-1].strip() if "\t" in line else line.split()[-1].strip()
+            break
+
+    if not mount_point or not os.path.exists(mount_point):
+        raise RuntimeError("Failed to mount DMG")
 
     try:
-        # 🔹 Brew uninstall
-        if tool_exists("brew"):
-            try:
-                run(["brew", "uninstall", "--cask", "kicad"], log)
-            except Exception:
-                log("[INFO] Brew uninstall failed, trying manual removal...")
+        app_path = None
+        for name in os.listdir(mount_point):
+            if name.lower().endswith(".app"):
+                app_path = os.path.join(mount_point, name)
+                break
 
-        # 🔹 Manual removal
-        app_path = "/Applications/KiCad.app"
-        if os.path.exists(app_path):
-            shutil.rmtree(app_path)
-            log("Removed KiCad.app")
+        if not app_path:
+            raise RuntimeError("KiCad app not found in DMG")
 
-    except Exception as e:
-        log(f"[ERROR] macOS uninstall failed: {e}")
-        raise
+        destination = os.path.join("/Applications", os.path.basename(app_path))
+
+        if os.path.exists(destination):
+            log("Removing old version...")
+            shutil.rmtree(destination)
+
+        log("Installing KiCad...")
+        run(["ditto", app_path, destination], log)
+
+    finally:
+        subprocess.run(["hdiutil", "detach", mount_point, "-quiet"], check=False)
+
+    installed_version = release["tag_name"].lstrip("v") if release else version
+    log(f"Installed KiCad {installed_version} ✅")
+
+    return installed_version, find_kicad_install_path()
 
 
 def _cleanup_kicad_files(log=print):

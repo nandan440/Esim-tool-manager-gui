@@ -48,7 +48,8 @@ def run(cmd, log=print, cwd=None):
 
     p.wait()
     if p.returncode != 0:
-        raise RuntimeError(f"Command failed: {display}")
+        log(f"Command failed: {display}")
+        return   #  don't crash whole app
 
 
 # ---------------- YAML ---------------- #
@@ -314,5 +315,5 @@ def uninstall_ngspice(log=print):
 
     except Exception as e:
         log(f"[ERROR] {e}")
-        raise
+        return
 

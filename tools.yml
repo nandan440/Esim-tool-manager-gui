@@ -92,8 +92,10 @@ tools:
     description: "Compiler infrastructure used by simulators"
     versions: ["18.1", "18.0", "17.0", "16.0"]
     type: executable
-    check: clang
-    version_cmd: clang --version
+    check: ["llvm-config", "clang"]
+    version_cmd:
+      - llvm-config --version
+      - clang --version
 
   Verilator:
     description: "Fast Verilog/SystemVerilog simulator"

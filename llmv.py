@@ -4,12 +4,13 @@ import shutil
 import subprocess
 import platform
 from datetime import datetime
-
 import yaml
 
 
 INSTALL_DETAILS_FILE = os.path.join(os.path.dirname(__file__), "install_details.yml")
 
+
+# ---------------- OS ---------------- #
 
 def get_os():
     system = platform.system().lower()
@@ -22,13 +23,15 @@ def get_os():
     return None
 
 
-def tool_exists(name: str) -> bool:
+def tool_exists(name):
     return shutil.which(name) is not None
 
 
+# ---------------- RUN ---------------- #
+
 def run(cmd, log=print, cwd=None):
-    display_cmd = cmd if isinstance(cmd, str) else " ".join(cmd)
-    log(f"> {display_cmd}")
+    display = cmd if isinstance(cmd, str) else " ".join(cmd)
+    log(f"> {display}")
 
     p = subprocess.Popen(
         cmd,
@@ -40,297 +43,215 @@ def run(cmd, log=print, cwd=None):
     )
 
     if p.stdout:
-        for line in p.stdout: 
+        for line in p.stdout:
             log(line.rstrip())
 
     p.wait()
     if p.returncode != 0:
-        raise RuntimeError(f"Command failed: {display_cmd}")
+        raise RuntimeError(f"Command failed: {display}")
 
 
-def _load_install_details():
+# ---------------- VERSION DETECTION ---------------- #
+
+def detect_llvm_version():
+    """
+    Primary: llvm-config (REAL LLVM)
+    Fallback: clang ONLY if it's from brew/apt/choco (not system clang)
+    """
+
+    # ✅ Primary check
     try:
-        if not os.path.exists(INSTALL_DETAILS_FILE):
-            return {"important_packages": []}
-        with open(INSTALL_DETAILS_FILE, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        if not isinstance(data, dict):
-            return {"important_packages": []}
-        if "important_packages" not in data or not isinstance(data.get("important_packages"), list):
-            data["important_packages"] = []
-        return data
-    except Exception:
-        return {"important_packages": []}
+        path = shutil.which("llvm-config")
+        if path:
+            return subprocess.check_output(
+                ["llvm-config", "--version"], text=True
+            ).strip()
+    except:
+        pass
 
-
-def _save_install_details(data):
-    with open(INSTALL_DETAILS_FILE, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, sort_keys=False)
-
-
-def _upsert_install_details(package_name: str, installed: bool, version: str, install_directory: str):
-    data = _load_install_details()
-    pkgs = data.setdefault("important_packages", [])
-
-    entry = None
-    for p in pkgs:
-        if isinstance(p, dict) and str(p.get("package_name", "")).lower() == package_name.lower():
-            entry = p
-            break
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    payload = {
-        "package_name": package_name,
-        "version": version if installed else "-",
-        "installed": "Yes" if installed else "No",
-        "installed_date": now if installed else "-",
-        "install_directory": install_directory if installed else "-",
-    }
-
-    if entry is None:
-        pkgs.append(payload)
-    else:
-        entry.update(payload)
-
-    _save_install_details(data)
-
-
-def _detect_installed_llvm_version(log):
+    # ⚠️ Fallback (only if not system clang)
     try:
-        if tool_exists("llvm-config"):
-            out = subprocess.check_output(["llvm-config", "--version"], text=True).strip()
-            return out or None
-    except Exception as e:
-        log(f"[WARN] llvm-config detection failed: {e}")
-
-    try:
-        if tool_exists("clang"):
-            out = subprocess.check_output(["clang", "--version"], text=True).strip()
+        clang_path = shutil.which("clang")
+        if clang_path and "homebrew" in clang_path.lower() or "llvm" in clang_path.lower():
+            out = subprocess.check_output(["clang", "--version"], text=True)
             m = re.search(r"clang version\s+(\d+(\.\d+){0,2})", out, re.IGNORECASE)
             if m:
                 return m.group(1)
-    except Exception as e:
-        log(f"[WARN] clang detection failed: {e}")
+    except:
+        pass
+
     return None
 
 
-def _choco_list_versions(log=print):
+def is_llvm_installed():
+    """
+    True only if REAL LLVM is installed (not system clang)
+    """
+    return shutil.which("llvm-config") is not None
+
+
+# ---------------- INSTALL DETAILS ---------------- #
+
+def _load():
+    if not os.path.exists(INSTALL_DETAILS_FILE):
+        return {"important_packages": []}
+    with open(INSTALL_DETAILS_FILE) as f:
+        return yaml.safe_load(f) or {"important_packages": []}
+
+
+def _save(data):
+    with open(INSTALL_DETAILS_FILE, "w") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+
+
+def _upsert(name, installed, version, path):
+    data = _load()
+    pkgs = data.setdefault("important_packages", [])
+
+    entry = next((p for p in pkgs if p.get("package_name") == name), None)
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    payload = {
+        "package_name": name,
+        "version": version if installed else "-",
+        "installed": "Yes" if installed else "No",
+        "installed_date": now if installed else "-",
+        "install_directory": path if installed else "-",
+    }
+
+    if entry:
+        entry.update(payload)
+    else:
+        pkgs.append(payload)
+
+    _save(data)
+
+
+# ---------------- WINDOWS VERSION SUPPORT ---------------- #
+
+def _choco_versions(log):
     try:
         result = subprocess.run(
             "choco search llvm --exact --all-versions",
             shell=True,
-            check=True,
             capture_output=True,
-            text=True,
+            text=True
         )
         versions = []
         for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line.lower().startswith("llvm "):
-                continue
-            parts = line.split()
-            if len(parts) >= 2:
-                versions.append(parts[1].strip())
+            if line.lower().startswith("llvm "):
+                versions.append(line.split()[1])
         return versions
     except Exception as e:
-        log(f"Failed to fetch LLVM versions from Chocolatey: {e}")
+        log(f"Failed to fetch versions: {e}")
         return []
 
 
-def _pick_best_prefix_version(prefix: str, versions, log):
-    prefix = (prefix or "").strip()
-    if prefix == "" or prefix.lower() == "latest":
-        return sorted(versions, reverse=True)[0] if versions else None
-    if prefix in versions:
-        return prefix
+def _pick_version(requested, versions):
+    if requested in ("", "latest"):
+        return sorted(versions, reverse=True)[0] if versions else "latest"
 
-    if re.fullmatch(r"\d+\.\d+", prefix):
-        pfx = prefix + "."
-    elif re.fullmatch(r"\d+", prefix):
-        pfx = prefix + "."
-    else:
-        pfx = prefix
+    if requested in versions:
+        return requested
 
-    def _key(v: str):
-        nums = re.split(r"[.-]", v)
-        major = int(nums[0]) if len(nums) > 0 and nums[0].isdigit() else -1
-        minor = int(nums[1]) if len(nums) > 1 and nums[1].isdigit() else -1
-        patch = int(nums[2]) if len(nums) > 2 and nums[2].isdigit() else -1
-        return (major, minor, patch, v)
+    prefix = requested + "."
+    matches = [v for v in versions if v.startswith(prefix)]
 
-    matches = [v for v in versions if isinstance(v, str) and v.startswith(pfx)]
-    if not matches:
-        # fallback: match major only
-        m = re.match(r"^(\d+)", prefix)
-        if m:
-            maj = m.group(1) + "."
-            matches = [v for v in versions if isinstance(v, str) and v.startswith(maj)]
-    if not matches:
-        return None
-    return sorted(matches, key=_key, reverse=True)[0]
+    return sorted(matches, reverse=True)[0] if matches else None
 
+
+# ---------------- INSTALL ---------------- #
 
 def install_llvm(version="latest", log=print):
-    """
-    Installs LLVM according to the selected version and OS.
-    Writes install metadata to `install_details.yml`.
-    """
+    log("=== INSTALLING LLVM ===")
+
     os_type = get_os()
-    if os_type is None:
-        log("Unsupported OS")
+
+    # ✅ Correct check
+    if is_llvm_installed():
+        v = detect_llvm_version() or "-"
+        log(f"LLVM already installed ({v})")
+        _upsert("llvm", True, v, shutil.which("llvm-config"))
         return
 
-    # If already installed, just record state and skip.
-    if tool_exists("llvm-config") or tool_exists("clang"):
-        installed_version = _detect_installed_llvm_version(log) or "-"
-        install_dir = shutil.which("llvm-config") or shutil.which("clang") or "-"
-        log(f"LLVM already installed (version: {installed_version}). Skipping installation.")
-        _upsert_install_details("llvm", True, installed_version, install_dir)
-        return
-
-    req_version = (version or "").strip() or "latest"
-
-    # ---------------- WINDOWS (Chocolatey) ----------------
     if os_type == "windows":
         if not tool_exists("choco"):
-            raise RuntimeError("Chocolatey (choco) not found. Install Chocolatey first.")
+            raise RuntimeError("Chocolatey not installed")
 
-        available = _choco_list_versions(log)
-
-        if not available:
-            if req_version == "latest":
-              chosen = "latest"
-            else:
-              raise RuntimeError("No LLVM versions found via Chocolatey")
-        else:
-            chosen = _pick_best_prefix_version(req_version, available, log)
-
-        if chosen is None:
-            raise RuntimeError(f"Requested LLVM version '{req_version}' not found in Chocolatey.")
+        versions = _choco_versions(log)
+        chosen = _pick_version(version, versions)
 
         if chosen == "latest":
             run("choco install -y llvm", log)
-        else:
+        elif chosen:
             run(f"choco install -y llvm --version={chosen}", log)
-
-        installed_version = _detect_installed_llvm_version(log) or chosen
-        install_dir = shutil.which("llvm-config") or shutil.which("clang") or "-"
-        _upsert_install_details("llvm", True, installed_version, install_dir)
-        log(f"LLVM installation complete (version: {installed_version})")
-        return
-
-    # ---------------- MAC (Homebrew) ----------------
-    if os_type == "mac":
-        if not tool_exists("brew"):
-            raise RuntimeError("Homebrew (brew) not found. Install Homebrew first.")
-
-        if req_version.lower() == "latest":
-            run("brew install llvm", log)
-            # llvm may not be linked into PATH; best effort record prefix
-            prefix = subprocess.check_output(["brew", "--prefix", "llvm"], text=True).strip()
-            installed_version = _detect_installed_llvm_version(log) or "latest"
-            _upsert_install_details("llvm", True, installed_version, prefix or "-")
-            log('⚠️ Add LLVM to PATH:')
-            log('export PATH="$(brew --prefix llvm)/bin:$PATH"')
-            log(f"LLVM installation complete (version: {installed_version})")
-            return
-
-        major = re.match(r"^(\d+)", req_version)
-        if not major:
-            raise RuntimeError(f"Invalid LLVM version: {req_version}")
-
-        formula = f"llvm@{major.group(1)}"
-        run(f"brew install {formula}", log)
-        # Try to make it available on PATH for tools that expect clang/llvm-config
-        run(f"brew link --force --overwrite {formula}", log)
-        prefix = subprocess.check_output(["brew", "--prefix", formula], text=True).strip()
-        installed_version = _detect_installed_llvm_version(log) or req_version
-        _upsert_install_details("llvm", True, installed_version, prefix or "-")
-        log('⚠️ Add LLVM to PATH:')
-        log('export PATH="$(brew --prefix llvm)/bin:$PATH"')
-        log(f"LLVM installation complete (version: {installed_version})")
-        return
-
-    # ---------------- LINUX (apt) ----------------
-    if os_type == "linux":
-        run("sudo apt-get update", log)
-        run("sudo apt-get install -y build-essential", log)
-        if req_version.lower() == "latest":
-            run("sudo apt-get install -y llvm clang", log)
         else:
-            major = re.match(r"^(\d+)", req_version)
-            if not major:
-                raise RuntimeError(f"Invalid LLVM version: {req_version}")
-            m = major.group(1)
-            run(f"sudo apt-get install -y llvm-{m} clang-{m}", log)
+            raise RuntimeError(f"Version {version} not found")
 
-        installed_version = _detect_installed_llvm_version(log) or req_version
-        install_dir = shutil.which("llvm-config") or shutil.which("clang") or "-"
-        _upsert_install_details("llvm", True, installed_version, install_dir)
-        log(f"LLVM installation complete (version: {installed_version})")
+    elif os_type == "mac":
+        if not tool_exists("brew"):
+            raise RuntimeError("Homebrew not installed")
+
+        run("brew install llvm", log)
+
+        # 🔥 fix PATH (important for detection)
+        try:
+            prefix = subprocess.check_output(["brew", "--prefix", "llvm"], text=True).strip()
+            os.environ["PATH"] += os.pathsep + os.path.join(prefix, "bin")
+        except:
+            pass
+
+    elif os_type == "linux":
+        run("sudo apt-get update", log)
+        run("sudo apt-get install -y llvm clang", log)
+
+    else:
+        log("Unsupported OS")
         return
 
-    log("Unsupported OS")
+    v = detect_llvm_version() or version
+    _upsert("llvm", True, v, shutil.which("llvm-config"))
 
-## uninstall LLVM
+    log(f"=== INSTALLED LLVM {v} ===")
+
+
+# ---------------- UNINSTALL ---------------- #
+
 def uninstall_llvm(log=print):
-    """
-    Uninstalls LLVM based on OS.
-    Updates install_details.yml accordingly.
-    """
     log("=== UNINSTALLING LLVM ===")
+
     os_type = get_os()
-    if os_type is None:
-        log("[ERROR] Unsupported OS")
-        return
 
-    # Check if installed
-    if not (tool_exists("llvm-config") or tool_exists("clang")):
-        log("[INFO] LLVM is not installed. Nothing to uninstall.")
-        _upsert_install_details("llvm", False, "-", "-")
+    if not is_llvm_installed():
+        log("LLVM not installed (real LLVM not found)")
+        _upsert("llvm", False, "-", "-")
         return
-
-    log("[INFO] Starting LLVM uninstall...")
 
     try:
-        # ---------------- WINDOWS ----------------
         if os_type == "windows":
-            if not tool_exists("choco"):
-                raise RuntimeError("Chocolatey not found")
-
             run("choco uninstall -y llvm", log)
 
-        # ---------------- MAC ----------------
         elif os_type == "mac":
-            if not tool_exists("brew"):
-                raise RuntimeError("Homebrew not found")
-
-            # Try both generic and versioned uninstall
+            # try both
             try:
-              run("brew uninstall llvm", log)
+                run("brew uninstall llvm", log)
             except:
-              log("[WARN] llvm not found in brew or already removed")
-            run("brew cleanup llvm", log)
+                log("[INFO] llvm not found in brew")
 
-        # ---------------- LINUX ----------------
+            run("brew cleanup", log)
+
         elif os_type == "linux":
-            # Remove common LLVM packages
-            run("sudo apt-get remove -y 'llvm-*' 'clang-*'", log)
+            run("sudo apt-get remove -y llvm clang", log)
             run("sudo apt-get autoremove -y", log)
 
         else:
-            log("[ERROR] Unsupported OS")
+            log("Unsupported OS")
             return
 
-        # Verify removal
-        if tool_exists("llvm-config") or tool_exists("clang"):
-            log("[WARN] LLVM may not be fully removed (some binaries still detected)")
-        else:
-            log("[SUCCESS] LLVM uninstalled successfully")
-
-        # Update metadata
-        if not (tool_exists("llvm-config") or tool_exists("clang")):
-          _upsert_install_details("llvm", False, "-", "-")
-
     except Exception as e:
-        log(f"[ERROR] Uninstall failed: {e}")
+        log(f"[ERROR] {e}")
+        return
+
+    _upsert("llvm", False, "-", "-")
+    log("=== LLVM REMOVED ===")

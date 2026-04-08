@@ -1,11 +1,10 @@
-import io
 import importlib.metadata
 import os
 import sys
-from contextlib import redirect_stdout
-
+import subprocess
 import yaml
-from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
+
+from PyQt5.QtCore import QObject, Qt, pyqtSignal, QRunnable, QThreadPool, pyqtSlot
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import *
 
@@ -21,25 +20,26 @@ class WorkerSignals(QObject):
     log = pyqtSignal(str)
     error = pyqtSignal(str)
     finished = pyqtSignal()
+    progress = pyqtSignal(str, int)  # tool_name, %
 
 
 # ---------------- WORKER ----------------
-class BackgroundWorker(QObject):
-    finished = pyqtSignal()
-
-    def __init__(self, task, signals):
+class Worker(QRunnable):
+    def __init__(self, fn, *args, **kwargs):
         super().__init__()
-        self.task = task
-        self.signals = signals
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        self.signals = WorkerSignals()
 
+    @pyqtSlot()
     def run(self):
         try:
-            self.task(self.signals.log.emit)
+            self.fn(self.signals, *self.args, **self.kwargs)
         except Exception as e:
             self.signals.error.emit(str(e))
         finally:
             self.signals.finished.emit()
-            self.finished.emit()
 
 
 # ---------------- GUI ----------------
@@ -47,8 +47,9 @@ class ToolManagerGUI(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.worker_thread = None
-        self.worker = None
+        self.threadpool = QThreadPool()
+        self.progress_bars = {}
+        self.log_buffer = []
 
         self.setWindowTitle(f"eSim Tool Manager - v{self.show_version()}")
         self.setGeometry(400, 200, 900, 550)
@@ -97,6 +98,7 @@ class ToolManagerGUI(QMainWindow):
             self.table.setCellWidget(row, 1, combo)
 
             self.table.setItem(row, 2, QTableWidgetItem(info.get("description", "")))
+
             self.table.setItem(row, 3, QTableWidgetItem("-"))
             self.table.setItem(row, 4, QTableWidgetItem("Checking..."))
 
@@ -119,18 +121,10 @@ class ToolManagerGUI(QMainWindow):
 
         layout.addLayout(btn_layout)
 
-        # System buttons
-        sys_layout = QHBoxLayout()
-
+        # Refresh
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.update_dependency_status)
-        sys_layout.addWidget(self.refresh_btn)
-
-        self.doctor_btn = QPushButton("Doctor")
-        self.doctor_btn.clicked.connect(self.run_doctor)
-        sys_layout.addWidget(self.doctor_btn)
-
-        layout.addLayout(sys_layout)
+        layout.addWidget(self.refresh_btn)
 
         # Output
         self.output = QTextEdit()
@@ -152,58 +146,64 @@ class ToolManagerGUI(QMainWindow):
 
         central.setLayout(layout)
 
+    # ---------- PROGRESS ----------
+    def add_progress_column(self):
+        if self.table.columnCount() == 5:
+            self.table.insertColumn(5)
+            self.table.setHorizontalHeaderItem(5, QTableWidgetItem("Progress"))
+
+    def remove_progress_column(self):
+        if self.table.columnCount() == 6:
+            self.table.removeColumn(5)
+        self.progress_bars.clear()
+
+    def add_progress_bar(self, row, tool_name):
+        bar = QProgressBar()
+        bar.setRange(0, 100)
+        bar.setValue(0)
+
+        bar.setStyleSheet("""
+        QProgressBar {
+            border: none;
+            background-color: #1e1e2e;
+            border-radius: 8px;
+            text-align: center;
+            color: white;
+        }
+        QProgressBar::chunk {
+            background-color: #7aa2f7;
+            border-radius: 8px;
+        }
+        """)
+
+        self.table.setCellWidget(row, 5, bar)
+        self.progress_bars[tool_name] = bar
+
+    def update_progress(self, tool, value):
+        if tool in self.progress_bars:
+            self.progress_bars[tool].setValue(value)
+
     # ---------- LOG ----------
     def log(self, text):
-        self.output.append(text)
+        self.log_buffer.append(text)
+        if len(self.log_buffer) >= 5:
+            self.output.append("\n".join(self.log_buffer))
+            self.log_buffer.clear()
 
-    # ---------- BUSY ----------
-    def set_busy(self, state):
-        for w in [
-            self.install_btn,
-            self.update_btn,
-            self.uninstall_btn,
-            self.refresh_btn,
-            self.doctor_btn,
-            self.table,
-        ]:
-            w.setEnabled(not state)
+    # ---------- TASK RUNNER ----------
+    def run_task(self, task, selected):
+        worker = Worker(task)
 
-    # ---------- THREAD ----------
-    def start_task(self, task, msg=None):
-        if self.worker_thread:
-            self.log("Task already running...")
-            return
+        worker.signals.log.connect(self.log)
+        worker.signals.error.connect(lambda e: self.log(f"Error: {e}"))
+        worker.signals.progress.connect(self.update_progress)
+        worker.signals.finished.connect(self.task_done)
 
-        if msg:
-            self.log(msg)
-
-        self.set_busy(True)
-
-        signals = WorkerSignals()
-        thread = QThread()
-        worker = BackgroundWorker(task, signals)
-
-        worker.moveToThread(thread)
-
-        thread.started.connect(worker.run)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-
-        signals.log.connect(self.log)
-        signals.error.connect(lambda e: self.log(f"Error: {e}"))
-        signals.finished.connect(self.task_done)
-
-        self.worker_thread = thread
-        self.worker = worker
-
-        thread.start()
+        self.threadpool.start(worker)
 
     def task_done(self):
         self.update_dependency_status()
-        self.set_busy(False)
-        self.worker = None
-        self.worker_thread = None
+        self.remove_progress_column()
 
     # ---------- SELECT ----------
     def get_selected(self):
@@ -212,7 +212,7 @@ class ToolManagerGUI(QMainWindow):
             if self.table.cellWidget(row, 0).isChecked():
                 tool = self.table.cellWidget(row, 0).text()
                 version = self.table.cellWidget(row, 1).currentText()
-                selected.append((tool, version))
+                selected.append((tool, version, row))
         return selected
 
     # ---------- ACTIONS ----------
@@ -222,32 +222,86 @@ class ToolManagerGUI(QMainWindow):
             self.log("Select tools first")
             return
 
-        def task(log):
-            for t, v in selected:
-                log(f"Installing {t} ({v})...")
-                installer.install_tool(t, version=v, log=log)
+        self.add_progress_column()
 
-        self.start_task(task, "Starting install...")
+        for t, _, row in selected:
+            self.add_progress_bar(row, t)
+
+        def task(signals):
+            total = len(selected)
+
+            for i, (t, v, _) in enumerate(selected):
+                try:
+                    signals.log.emit(f"Installing {t} ({v})...")
+
+                    installer.install_tool(t, version=v, log=signals.log.emit)
+
+                    progress = int(((i + 1) / total) * 100)
+                    signals.progress.emit(t, progress)
+
+                except Exception as e:
+                    signals.log.emit(f"{t} failed: {e}")
+
+        self.run_task(task, selected)
 
     def update_tool(self):
         selected = self.get_selected()
+        if not selected:
+            self.log("Select tools first")
+            return
 
-        def task(log):
-            for t, _ in selected:
-                log(f"Updating {t}...")
-                installer.install_tool(t, version="latest", log=log)
+        self.add_progress_column()
 
-        self.start_task(task, "Starting update...")
+        for t, _, row in selected:
+            self.add_progress_bar(row, t)
+
+        def task(signals):
+            results = dependency.check_dependencies()
+            installed_map = {t.lower(): status for t, status, _ in results}
+
+            total = len(selected)
+
+            for i, (t, _, _) in enumerate(selected):
+                try:
+                    if installed_map.get(t.lower()) != "installed":
+                        signals.log.emit(f"{t} not installed. Skipping.")
+                        continue
+
+                    installer.install_tool(t, version="latest", log=signals.log.emit)
+
+                    progress = int(((i + 1) / total) * 100)
+                    signals.progress.emit(t, progress)
+
+                except Exception as e:
+                    signals.log.emit(f"{t} update failed: {e}")
+
+        self.run_task(task, selected)
 
     def uninstall_tool(self):
         selected = self.get_selected()
+        if not selected:
+            self.log("Select tools first")
+            return
 
-        def task(log):
-            for t, _ in selected:
-                log(f"Uninstalling {t}...")
-                installer.uninstall_tool(t, log=log)
+        self.add_progress_column()
 
-        self.start_task(task, "Starting uninstall...")
+        for t, _, row in selected:
+            self.add_progress_bar(row, t)
+
+        def task(signals):
+            total = len(selected)
+
+            for i, (t, _, _) in enumerate(selected):
+                try:
+                    installer.uninstall_tool(t, log=signals.log.emit)
+
+                    progress = int(((i + 1) / total) * 100)
+                    signals.progress.emit(t, progress)
+
+                except Exception as e:
+                    signals.log.emit(f"{t} uninstall failed: {e}")
+
+        self.run_task(task, selected)
 
     # ---------- STATUS ----------
     def update_dependency_status(self):
@@ -258,21 +312,12 @@ class ToolManagerGUI(QMainWindow):
             for row in range(self.table.rowCount()):
                 tool = self.table.cellWidget(row, 0).text().lower()
                 status, version = data.get(tool, ("not installed", "-"))
+
                 self.table.setItem(row, 3, QTableWidgetItem(version))
                 self.table.setItem(row, 4, QTableWidgetItem(status))
+
         except Exception as e:
             self.log(str(e))
-
-    # ---------- DOCTOR ----------
-    def run_doctor(self):
-        def task(log):
-            buffer = io.StringIO()
-            with redirect_stdout(buffer):
-                dependency.run_doctor()
-            for line in buffer.getvalue().splitlines():
-                log(line)
-
-        self.start_task(task, "Running doctor...")
 
     # ---------- COMMAND ----------
     def execute_command(self):
