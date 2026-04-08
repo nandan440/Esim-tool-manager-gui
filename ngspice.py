@@ -217,15 +217,37 @@ def install_linux(version, cfg, log):
 
 
 def install_windows(version, cfg, log):
-    if not tool_exists("choco"):
-        raise RuntimeError("Chocolatey not installed")
+    win_cfg = cfg["install"]["windows"]
 
-    pkg = cfg["install"]["windows"].get("package", "ngspice")
+    base_dir = os.path.join(os.getcwd(), "tools")
+    os.makedirs(base_dir, exist_ok=True)
 
-    if version == "latest":
-        run(f"choco install -y {pkg}", log)
-    else:
-        run(f"choco install -y {pkg} --version={version}", log)
+    archive = os.path.join(base_dir, win_cfg["archive_name"].format(version=version))
+    out_folder = os.path.join(base_dir, win_cfg["extract_folder"].format(version=version))
+
+    url = win_cfg["url_template"].format(version=version)
+    fallback = win_cfg["fallback_url_template"].format(version=version)
+
+    # -------- Download with fallback -------- #
+    try:
+        _download(url, archive, log)
+    except Exception:
+        log("Main URL failed, trying fallback...")
+        try:
+            _download(fallback, archive, log)
+        except Exception:
+            raise RuntimeError(f"❌ Failed to download ngspice {version}")
+
+    os.makedirs(out_folder, exist_ok=True)
+
+    # -------- 7z check -------- #
+    if not tool_exists("7z"):
+        raise RuntimeError("❌ 7-Zip not found. Install it first.")
+
+    run(f'7z x "{archive}" -o"{out_folder}"', log)
+
+    log(f"✅ Ngspice {version} installed at {out_folder}")
+    log(f"👉 Add to PATH: {out_folder}")
 
 
 def install_mac(cfg, log):

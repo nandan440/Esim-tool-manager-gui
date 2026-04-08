@@ -18,8 +18,14 @@ tools:
 
     install:
       windows:
-        method: choco
-        package: ngspice
+        method: archive
+
+        url_template: "https://sourceforge.net/projects/ngspice/files/ng-spice-rework/{version}/ngspice-{version}_64.7z/download"
+
+        fallback_url_template: "https://sourceforge.net/projects/ngspice/files/ng-spice-rework/old-releases/{version}/ngspice-{version}_64.7z/download"
+
+        archive_name: "ngspice-{version}.7z"
+        extract_folder: "ngspice-{version}"
 
       linux:
         method: source

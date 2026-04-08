@@ -124,7 +124,14 @@ class ToolManagerGUI(QMainWindow):
         # Refresh
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.update_dependency_status)
+<<<<<<< HEAD
         layout.addWidget(self.refresh_btn)
+=======
+        sys_layout.addWidget(self.refresh_btn)
+
+
+        layout.addLayout(sys_layout)
+>>>>>>> 9538b1261ecbfad03466fcfd8e9694a5faac3225
 
         # Output
         self.output = QTextEdit()
