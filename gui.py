@@ -20,22 +20,20 @@ class WorkerSignals(QObject):
     log = pyqtSignal(str)
     error = pyqtSignal(str)
     finished = pyqtSignal()
-    progress = pyqtSignal(str, int)  # tool_name, %
+    progress = pyqtSignal(str, int)
 
 
 # ---------------- WORKER ----------------
 class Worker(QRunnable):
-    def __init__(self, fn, *args, **kwargs):
+    def __init__(self, fn):
         super().__init__()
         self.fn = fn
-        self.args = args
-        self.kwargs = kwargs
         self.signals = WorkerSignals()
 
     @pyqtSlot()
     def run(self):
         try:
-            self.fn(self.signals, *self.args, **self.kwargs)
+            self.fn(self.signals)
         except Exception as e:
             self.signals.error.emit(str(e))
         finally:
@@ -98,7 +96,6 @@ class ToolManagerGUI(QMainWindow):
             self.table.setCellWidget(row, 1, combo)
 
             self.table.setItem(row, 2, QTableWidgetItem(info.get("description", "")))
-
             self.table.setItem(row, 3, QTableWidgetItem("-"))
             self.table.setItem(row, 4, QTableWidgetItem("Checking..."))
 
@@ -124,14 +121,7 @@ class ToolManagerGUI(QMainWindow):
         # Refresh
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.update_dependency_status)
-<<<<<<< HEAD
         layout.addWidget(self.refresh_btn)
-=======
-        sys_layout.addWidget(self.refresh_btn)
-
-
-        layout.addLayout(sys_layout)
->>>>>>> 9538b1261ecbfad03466fcfd8e9694a5faac3225
 
         # Output
         self.output = QTextEdit()
@@ -198,7 +188,7 @@ class ToolManagerGUI(QMainWindow):
             self.log_buffer.clear()
 
     # ---------- TASK RUNNER ----------
-    def run_task(self, task, selected):
+    def run_task(self, task):
         worker = Worker(task)
 
         worker.signals.log.connect(self.log)
@@ -240,7 +230,6 @@ class ToolManagerGUI(QMainWindow):
             for i, (t, v, _) in enumerate(selected):
                 try:
                     signals.log.emit(f"Installing {t} ({v})...")
-
                     installer.install_tool(t, version=v, log=signals.log.emit)
 
                     progress = int(((i + 1) / total) * 100)
@@ -249,7 +238,7 @@ class ToolManagerGUI(QMainWindow):
                 except Exception as e:
                     signals.log.emit(f"{t} failed: {e}")
 
-        self.run_task(task, selected)
+        self.run_task(task)
 
     def update_tool(self):
         selected = self.get_selected()
@@ -282,7 +271,7 @@ class ToolManagerGUI(QMainWindow):
                 except Exception as e:
                     signals.log.emit(f"{t} update failed: {e}")
 
-        self.run_task(task, selected)
+        self.run_task(task)
 
     def uninstall_tool(self):
         selected = self.get_selected()
@@ -308,7 +297,7 @@ class ToolManagerGUI(QMainWindow):
                 except Exception as e:
                     signals.log.emit(f"{t} uninstall failed: {e}")
 
-        self.run_task(task, selected)
+        self.run_task(task)
 
     # ---------- STATUS ----------
     def update_dependency_status(self):
